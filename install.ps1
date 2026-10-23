@@ -179,14 +179,28 @@ $settings.StopIfGoingOnBatteries     = $false
 $settings.RestartInterval = 'PT1M'
 $settings.RestartCount    = 999
 
-# RunLevel Highest（最高权限）是必须的：
-#   Steam / 反作弊游戏常以管理员权限启动，普通权限的脚本读不到它们的
-#   可执行文件路径（Get-Process 的 .Path 返回 null），就会静默跳过、
-#   表现为「启动游戏没反应」。
-$principal = New-ScheduledTaskPrincipal `
-    -UserId "$env:USERDOMAIN\$env:USERNAME" `
-    -LogonType Interactive `
-    -RunLevel Highest
+# RunLevel 选择策略：
+#   Highest 需要「管理员权限才能注册任务」。普通用户直接注册会被拒绝访问，
+#   导致整个安装失败 —— 对一个「双击安装」的工具来说不可接受。
+#   所以：先尝试 Highest，失败自动回退 Limited，并明确告知用户差异。
+#
+#   为什么想要 Highest：Steam / 反作弊游戏有时以管理员权限启动，
+#   普通权限的脚本读不到它们的可执行路径（Get-Process 的 .Path 返回 null）。
+$principal = $null
+$runLevelNote = ''
+try {
+    $principal = New-ScheduledTaskPrincipal `
+        -UserId "$env:USERDOMAIN\$env:USERNAME" `
+        -LogonType Interactive `
+        -RunLevel Highest
+    $runLevelNote = 'Highest'
+} catch {
+    $principal = New-ScheduledTaskPrincipal `
+        -UserId "$env:USERDOMAIN\$env:USERNAME" `
+        -LogonType Interactive `
+        -RunLevel Limited
+    $runLevelNote = 'Limited'
+}
 
 Write-Host ''
 Write-Host '设置开机自动启动...'
@@ -197,14 +211,48 @@ if ($old) {
     Write-Info '（已覆盖旧的安装）'
 }
 
-Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger `
-    -Settings $settings -Principal $principal `
-    -Description '游戏启动前自动确认 NVIDIA 即时回放已开启，游戏退出后自动关闭（若回放由脚本开启）。' | Out-Null
+# 先试 Highest，被拒绝则自动降级为 Limited
+$registered = $false
+try {
+    Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger `
+        -Settings $settings -Principal $principal `
+        -Description '游戏启动前自动确认 NVIDIA 即时回放已开启，游戏退出后自动关闭（若回放由脚本开启）。' `
+        -ErrorAction Stop | Out-Null
+    $registered = $true
+} catch {
+    # 常见原因：非管理员会话无法注册 Highest 任务（拒绝访问）
+    $principal = New-ScheduledTaskPrincipal `
+        -UserId "$env:USERDOMAIN\$env:USERNAME" `
+        -LogonType Interactive `
+        -RunLevel Limited
+    $runLevelNote = 'Limited'
+
+    try {
+        Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger `
+            -Settings $settings -Principal $principal `
+            -Description '游戏启动前自动确认 NVIDIA 即时回放已开启，游戏退出后自动关闭（若回放由脚本开启）。' `
+            -ErrorAction Stop | Out-Null
+        $registered = $true
+    } catch {
+        Write-Err "创建计划任务失败：$($_.Exception.Message)"
+        Write-Err '请尝试右键「点此一键安装.bat」→ 以管理员身份运行'
+        throw
+    }
+}
 
 Write-Ok "已创建计划任务：$TaskName"
 Write-Info "  触发时机 : 你每次登录 Windows 时"
 Write-Info "  电池模式 : 允许运行（笔记本也生效）"
 Write-Info "  崩溃恢复 : 每分钟重试，最多 999 次"
+Write-Info "  运行权限 : $(if ($runLevelNote -eq 'Highest') { '最高权限' } else { '普通权限' })"
+
+if ($runLevelNote -ne 'Highest') {
+    Write-Host ''
+    Write-Warn '当前以「普通权限」运行。'
+    Write-Warn '如果你的游戏是以管理员身份启动的（部分反作弊游戏如此），'
+    Write-Warn '脚本可能读不到它的进程路径，表现为「开了游戏没反应」。'
+    Write-Warn '解决办法：右键「点此一键安装.bat」→ 以管理员身份运行，重新安装一次。'
+}
 
 # --- 立即启动一次 ---
 Write-Host ''
