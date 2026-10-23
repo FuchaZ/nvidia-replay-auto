@@ -1,25 +1,22 @@
 ﻿<#
 .SYNOPSIS
-    一键安装 / 卸载 NvidiaInstantReplayAuto 的登录自启计划任务。
+    一键安装 / 卸载 NvidiaInstantReplayAuto 的开机自启。
 
 .DESCRIPTION
-    自动定位同目录下的 run-hidden.vbs，注册计划任务。
-    因为路径全部相对脚本自身位置计算，整个文件夹拷到任何电脑都能直接用。
+    双击 install.bat   → 安装
+    双击 uninstall.bat → 卸载
+
+    安装后会注册一个「用户登录时自动启动」的计划任务，
+    所以以后开机登录就会自动运行，不需要手动开。
 
 .PARAMETER Uninstall
-    卸载计划任务。
+    卸载：删除计划任务并结束正在运行的实例。
 
 .PARAMETER UseVbs
     强制使用 VBS 静默启动（默认自动探测 VBScript 是否可用）。
 
 .PARAMETER TaskName
     计划任务名称，默认 NvidiaInstantReplayAuto。
-
-.EXAMPLE
-    powershell -ExecutionPolicy Bypass -File .\install.ps1
-
-.EXAMPLE
-    powershell -ExecutionPolicy Bypass -File .\install.ps1 -Uninstall
 #>
 [CmdletBinding()]
 param(
@@ -30,75 +27,137 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$here   = Split-Path -Parent $MyInvocation.MyCommand.Path
-$script = Join-Path $here 'NvidiaInstantReplayAuto.ps1'
-$vbs    = Join-Path $here 'run-hidden.vbs'
-$ps     = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+$here    = Split-Path -Parent $MyInvocation.MyCommand.Path
+$script  = Join-Path $here 'NvidiaInstantReplayAuto.ps1'
+$vbs     = Join-Path $here 'run-hidden.vbs'
+$ps      = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
 $wscript = "$env:SystemRoot\System32\wscript.exe"
 
-function Write-Step($msg) { Write-Host "  $msg" }
+function Write-Ok($msg)   { Write-Host "  [OK] $msg"   -ForegroundColor Green }
+function Write-Info($msg) { Write-Host "  $msg" }
+function Write-Warn($msg) { Write-Host "  [!] $msg"    -ForegroundColor Yellow }
+function Write-Err($msg)  { Write-Host "  [X] $msg"    -ForegroundColor Red }
 
-# ---------------------------------------------------------------- 卸载
-if ($Uninstall) {
-    Write-Host '卸载计划任务...'
-    $t = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-    if ($t) {
-        Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
-        Write-Step "已移除任务：$TaskName"
-    } else {
-        Write-Step "任务不存在：$TaskName"
-    }
-    # 结束残留实例
+function Stop-RunningInstances {
+    $n = 0
     Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
         Where-Object { $_.CommandLine -and $_.CommandLine -match 'NvidiaInstantReplayAuto' } |
         ForEach-Object {
             Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
-            Write-Step "已结束进程 pid=$($_.ProcessId)"
+            $n++
         }
-    Write-Host '卸载完成。'
+    return $n
+}
+
+# ============================================================ 卸载
+if ($Uninstall) {
+    Write-Host ''
+    Write-Host '卸载 NVIDIA 即时回放自动开关' -ForegroundColor Cyan
+    Write-Host '----------------------------------------'
+
+    $t = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    if ($t) {
+        Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
+        Write-Ok "已删除开机自启任务：$TaskName"
+    } else {
+        Write-Info "未找到计划任务（可能已经卸载过了）"
+    }
+
+    $killed = Stop-RunningInstances
+    if ($killed -gt 0) {
+        Write-Ok "已结束 $killed 个正在运行的实例"
+    } else {
+        Write-Info "没有正在运行的实例"
+    }
+
+    Write-Host ''
+    Write-Host '卸载完成！' -ForegroundColor Green
+    Write-Host '  现在可以把这个文件夹整个删掉了。'
+    Write-Host ''
+    Write-Host '  注意：本工具不会修改你的 NVIDIA App 设置。' -ForegroundColor Yellow
+    Write-Host '        即时回放当前是什么状态，卸载后就保持什么状态。' -ForegroundColor Yellow
+    Write-Host ''
     return
 }
 
-# ---------------------------------------------------------------- 前置检查
+# ============================================================ 安装
+Write-Host ''
+Write-Host 'NVIDIA 即时回放自动开关 - 安装' -ForegroundColor Cyan
+Write-Host '----------------------------------------'
+Write-Host ''
+Write-Host '这个工具会做一件事：' -ForegroundColor White
+Write-Host '  你启动游戏时自动打开 NVIDIA 即时回放，退出游戏时自动关闭。'
+Write-Host ''
 Write-Host '检查环境...'
+Write-Host ''
 
-if (-not (Test-Path $script)) { throw "找不到主脚本：$script" }
-Write-Step "主脚本     : $script"
+# --- 文件检查 ---
+if (-not (Test-Path $script)) {
+    Write-Err "找不到主脚本：$script"
+    Write-Err '请确认整个文件夹是完整下载的，不要只拷单个文件。'
+    throw '主脚本缺失'
+}
+Write-Ok "主程序       : NvidiaInstantReplayAuto.ps1"
 
-if (-not (Test-Path $ps)) { throw "找不到 PowerShell：$ps" }
-Write-Step "PowerShell : $ps"
+if (-not (Test-Path $ps)) {
+    Write-Err "找不到 PowerShell：$ps"
+    throw 'PowerShell 缺失'
+}
+Write-Ok "PowerShell   : 系统自带 5.1"
 
 $discovery = Join-Path $here 'discovery.ps1'
-if (Test-Path $discovery) { Write-Step "自动探测   : 已就绪" }
-else { Write-Step "自动探测   : 缺失（需手动指定目录参数）" }
+if (Test-Path $discovery) {
+    Write-Ok "游戏库探测   : 已就绪（自动找 Steam / WeGame）"
+} else {
+    Write-Warn "游戏库探测   : discovery.ps1 缺失，需要手动指定游戏目录"
+}
 
-# ---------------------------------------------------------------- 决定启动方式
+# --- 决定启动方式 ---
 $useSilent = $false
-if ($UseVbs -or (Test-Path $vbs)) {
-    if (-not (Test-Path $vbs)) {
-        Write-Step "警告：指定了 -UseVbs 但找不到 run-hidden.vbs，将退回直调"
+if (-not (Test-Path $vbs)) {
+    Write-Warn "静默启动器   : run-hidden.vbs 缺失，将使用会闪窗的方式"
+}
+elseif (-not (Test-Path $wscript)) {
+    Write-Warn "静默启动器   : 系统缺少 wscript.exe，将使用会闪窗的方式"
+}
+else {
+    $probe = Join-Path $env:TEMP "~nv_vbs_probe_$PID.vbs"
+    try {
+        Set-Content -Path $probe -Value 'WScript.Echo "OK"' -Encoding ASCII
+        $r = & "$env:SystemRoot\System32\cscript.exe" //nologo $probe 2>&1
+        $useSilent = ($r -match 'OK')
+    } catch {
+        $useSilent = $false
+    } finally {
+        Remove-Item $probe -Force -ErrorAction SilentlyContinue
     }
-    elseif (-not (Test-Path $wscript)) {
-        Write-Step "警告：系统缺少 wscript.exe，将退回直调（会有窗口）"
-    }
-    else {
-        # 真正跑一次探针，确认 VBScript 引擎可用
-        $probe = Join-Path $env:TEMP "~nv_vbs_probe_$PID.vbs"
-        try {
-            Set-Content -Path $probe -Value 'WScript.Echo "OK"' -Encoding ASCII
-            $r = & "$env:SystemRoot\System32\cscript.exe" //nologo $probe 2>&1
-            $useSilent = ($r -match 'OK')
-        } catch {
-            $useSilent = $false
-        } finally {
-            Remove-Item $probe -Force -ErrorAction SilentlyContinue
-        }
-        if ($useSilent) { Write-Step "启动方式   : VBS 静默（无窗口）" }
-        else { Write-Step "启动方式   : VBScript 不可用，退回直调（会有窗口）" }
+
+    if ($useSilent) {
+        Write-Ok "静默启动器   : 可用（运行时不显示窗口）"
+    } else {
+        Write-Warn "静默启动器   : VBScript 不可用，运行时会看到一个小黑窗（不影响功能）"
     }
 }
 
-# ---------------------------------------------------------------- 构造动作
+# --- 检查 NVIDIA App ---
+Write-Host ''
+Write-Host '检查 NVIDIA App...'
+$nvApp = Get-Process 'NVIDIA App' -ErrorAction SilentlyContinue
+$mcpOk = $false
+try {
+    $mcpOk = (Test-NetConnection -ComputerName 127.0.0.1 -Port 13508 -WarningAction SilentlyContinue).TcpTestSucceeded
+} catch { }
+
+if ($mcpOk) {
+    Write-Ok "NVIDIA App 接口 : 可连接 (127.0.0.1:13508)"
+} else {
+    Write-Warn "NVIDIA App 接口 : 连不上 127.0.0.1:13508"
+    Write-Warn "  请打开 NVIDIA App → 设置 → 开启「允许 AI 智能体控制 NVIDIA App」"
+    Write-Warn "  这一步是必须的，否则工具无法控制即时回放。"
+    Write-Warn "  注意：这只是开一个本机接口，不需要你安装任何 AI 软件。"
+}
+
+# --- 构造计划任务 ---
 if ($useSilent) {
     $action = New-ScheduledTaskAction -Execute $wscript -Argument "`"$vbs`"" -WorkingDirectory $here
 } else {
@@ -125,35 +184,98 @@ $principal = New-ScheduledTaskPrincipal `
     -LogonType Interactive `
     -RunLevel Limited
 
-# ---------------------------------------------------------------- 注册
+Write-Host ''
+Write-Host '设置开机自动启动...'
+
 $old = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
 if ($old) {
     Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
-    Write-Step '已移除旧的同名任务'
+    Write-Info '（已覆盖旧的安装）'
 }
 
 Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger `
     -Settings $settings -Principal $principal `
     -Description '游戏启动前自动确认 NVIDIA 即时回放已开启，游戏退出后自动关闭（若回放由脚本开启）。' | Out-Null
 
-Write-Host ''
-Write-Host '安装完成！' -ForegroundColor Green
-Write-Step "任务名     : $TaskName"
-Write-Step "触发器     : 用户登录时"
-Write-Step "动作       : $($action.Execute)"
+Write-Ok "已创建计划任务：$TaskName"
+Write-Info "  触发时机 : 你每次登录 Windows 时"
+Write-Info "  电池模式 : 允许运行（笔记本也生效）"
+Write-Info "  崩溃恢复 : 每分钟重试，最多 999 次"
 
-# 立即启动一次，省得等下次登录
+# --- 立即启动一次 ---
+Write-Host ''
+Write-Host '立即启动一次（不用等下次开机）...'
 Start-ScheduledTask -TaskName $TaskName
 Start-Sleep -Seconds 5
 
 $running = Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
     Where-Object { $_.CommandLine -and $_.CommandLine -match 'NvidiaInstantReplayAuto' }
 if ($running) {
-    Write-Step "已启动     : pid=$($running[0].ProcessId)"
+    Write-Ok "已在后台运行 (pid=$($running[0].ProcessId))"
 } else {
-    Write-Step "提示       : 未检测到运行中的实例，可查看 replay-auto.log 排查"
+    Write-Warn '没有检测到运行中的实例，请查看同目录的 replay-auto.log'
 }
+
+# --- 列出识别到的游戏 ---
 Write-Host ''
-Write-Host '提示：首次使用前，请在 NVIDIA App 设置里开启「允许 AI 智能体控制 NVIDIA App」' -ForegroundColor Yellow
-Write-Host '      （这只开一个本机 127.0.0.1 接口，不需要任何 AI 软件）' -ForegroundColor Yellow
-Write-Host '      想先看看会监控哪些游戏：powershell -File .\NvidiaInstantReplayAuto.ps1 -DryRun' -ForegroundColor Yellow
+Write-Host '扫描你电脑上的游戏...' -ForegroundColor White
+Write-Host ''
+
+$gameList = @()
+try {
+    # 用独立进程跑一次枚举，避免和已启动的后台实例抢互斥锁
+    $listScript = Join-Path $here '_list-games.ps1'
+    if (Test-Path $listScript) {
+        $raw = & $ps -NoProfile -ExecutionPolicy Bypass -File $listScript -Json 2>$null
+        if ($raw) {
+            $parsed = $raw | ConvertFrom-Json
+            $gameList = @($parsed)
+        }
+    }
+} catch {
+    Write-Warn "扫描游戏时出错：$($_.Exception.Message)"
+}
+
+if ($gameList.Count -eq 0) {
+    Write-Warn '没有识别到任何游戏目录。'
+    Write-Warn '可能原因：Steam / WeGame 装在非标准位置，或还没安装游戏。'
+    Write-Warn '可以用 -ExtraGameDirs 参数手动添加游戏目录。'
+} else {
+    Write-Host ("识别到 {0} 个游戏，它们启动时会自动开启即时回放：" -f $gameList.Count) -ForegroundColor Green
+    Write-Host ''
+
+    foreach ($src in @('Steam', 'WeGame', 'Epic', 'Extra')) {
+        $group = @($gameList | Where-Object { $_.Source -eq $src })
+        if ($group.Count -eq 0) { continue }
+
+        Write-Host ("  [{0}] 共 {1} 个" -f $src, $group.Count) -ForegroundColor Cyan
+        foreach ($g in ($group | Sort-Object Name)) {
+            Write-Host ("    · {0}" -f $g.Name)
+        }
+        Write-Host ''
+    }
+
+    Write-Host '  如果这里有你不希望被监控的程序，可以双击 uninstall.bat 卸载，' -ForegroundColor Yellow
+    Write-Host '  或参考 README 用 -ExcludeTools 参数排除。' -ForegroundColor Yellow
+    Write-Host ''
+}
+
+# --- 说明 ---
+Write-Host ''
+Write-Host '============================================' -ForegroundColor Green
+Write-Host '  安装完成！' -ForegroundColor Green
+Write-Host '============================================' -ForegroundColor Green
+Write-Host ''
+Write-Host '现在开始：' -ForegroundColor White
+Write-Host '  · 你启动游戏 → 自动打开即时回放'
+Write-Host '  · 你退出游戏 → 自动关闭即时回放'
+Write-Host '  · 你自己手动开关的结果，工具不会覆盖'
+Write-Host ''
+Write-Host '后台会一直运行，开机自动启动，不需要你管。' -ForegroundColor White
+Write-Host ''
+Write-Host '常用操作：' -ForegroundColor White
+Write-Host '  · 想卸载     → 双击 uninstall.bat'
+Write-Host '  · 看它认了哪些游戏 → 在本文件夹打开 PowerShell 运行：'
+Write-Host '       powershell -ExecutionPolicy Bypass -File .\NvidiaInstantReplayAuto.ps1 -DryRun'
+Write-Host '  · 看运行日志 → 同目录的 replay-auto.log'
+Write-Host ''

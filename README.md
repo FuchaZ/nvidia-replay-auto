@@ -94,20 +94,61 @@ WeGame 扫描 `rail_apps`，并排除反作弊、启动器、性能采集等辅�
 
 ## 安装
 
-```powershell
-# 1. 下载本仓库到任意目录（路径随意，不要放在受保护目录）
-# 2. 右键 install.ps1 → 用 PowerShell 运行，或：
+### 方法一：双击安装（推荐，给不熟悉命令行的朋友）
 
+1. 到 [Releases](https://github.com/FuchaZ/nvidia-replay-auto/releases) 下载最新的 `.zip`
+2. 解压到任意位置（**不要在压缩包里直接运行**，要先解压）
+3. 双击 **`install.bat`**
+4. 按提示确认即可
+
+安装脚本会自动：
+
+- 检查环境（PowerShell / NVIDIA App 接口连通性）
+- 注册**登录时自启**的计划任务
+- 立即启动一次，不用等下次开机
+- **打印识别到的游戏清单**，让你确认哪些游戏会生效
+
+> 安装完会看到类似这样的清单：
+>
+> ```
+> 识别到 17 个游戏，它们启动时会自动开启即时回放：
+>
+>   [Steam] 共 16 个
+>     · BeamNG.drive
+>     · Black Myth: Wukong
+>     · Counter-Strike 2
+>     ...
+>   [WeGame] 共 1 个
+>     · DeltaForce
+> ```
+
+### 方法二：命令行
+
+```powershell
+git clone https://github.com/FuchaZ/nvidia-replay-auto.git
+cd nvidia-replay-auto
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
-安装脚本会：
+### 卸载
 
-1. 检查 PowerShell / VBScript 是否可用
-2. 注册登录时自启的计划任务（**允许电池供电运行**，笔记本可用）
-3. 立即启动一次，省得等下次登录
+双击 **`uninstall.bat`**，会：
 
-### 先看看会监控哪些游戏
+- 删除开机自启的计划任务
+- 结束正在运行的实例
+- 之后可以整个文件夹删掉
+
+> 卸载不会改动你的 NVIDIA App 设置。即时回放当前是什么状态，卸载后就保持什么状态。
+
+### 只看识别到哪些游戏（不安装）
+
+双击 `list-games.bat`，或：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\_list-games.ps1
+```
+
+### 想先看看会监控哪些游戏（含路径与自检）
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\NvidiaInstantReplayAuto.ps1 -DryRun
@@ -119,15 +160,14 @@ powershell -ExecutionPolicy Bypass -File .\NvidiaInstantReplayAuto.ps1 -DryRun
 Steam：已登记 16 个游戏目录（来源 d:\steam\steamapps）
 WeGame：已登记 1 个游戏目录（来源 D:\WeGameApps\rail_apps）
 [DryRun] 已解析 17 个游戏目录：
-    d:\steam\steamapps\common\counter-strike global offensive
+  --- Steam (16) ---
+    Counter-Strike 2
+      d:\steam\steamapps\common\Counter-Strike Global Offensive
     ...
+  --- WeGame (1) ---
+    DeltaForce
+      D:\WeGameApps\rail_apps\DeltaForce(2001918)
 [DryRun] 抽查结果：7/7 通过
-```
-
-### 卸载
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\install.ps1 -Uninstall
 ```
 
 ## 命令行参数

@@ -238,8 +238,14 @@ function Get-TargetRoots {
         WeGame：取 rail_apps 下每个游戏目录
         Epic  ：取清单里登记的安装目录（需 -IncludeEpic）
         其余 ：由 -ExtraGameDirs 手动补充
+
+        返回对象数组，每项含：
+          Root  - 小写、末尾无反斜杠的路径（用于前缀匹配）
+          Path  - 原始大小写路径（用于展示）
+          Name  - 给人看的名称
+          Source- Steam / WeGame / Epic / Extra
     #>
-    $roots = @()
+    $items = @()
 
     foreach ($appsDir in $SteamAppsDirs) {
         if (-not (Test-Path $appsDir)) {
@@ -255,9 +261,17 @@ function Get-TargetRoots {
             $installDir = $Matches[1]
             if ($ExcludeTools -contains $installDir) { continue }
 
+            $displayName = $installDir
+            if ($raw -match '"name"\s+"([^"]+)"') { $displayName = $Matches[1] }
+
             $full = Join-Path $commonDir $installDir
             if (Test-Path $full) {
-                $roots += $full
+                $items += [pscustomobject]@{
+                    Root   = $full.TrimEnd('\').ToLowerInvariant()
+                    Path   = $full
+                    Name   = $displayName
+                    Source = 'Steam'
+                }
                 $count++
             }
         }
@@ -271,7 +285,14 @@ function Get-TargetRoots {
         }
         $count = 0
         foreach ($g in Get-ChildItem $wgDir -Directory -ErrorAction SilentlyContinue) {
-            $roots += $g.FullName
+            # 目录名形如 DeltaForce(2001918)，去掉括号里的 appid 更好看
+            $nice = $g.Name -replace '\(\d+\)\s*$', ''
+            $items += [pscustomobject]@{
+                Root   = $g.FullName.TrimEnd('\').ToLowerInvariant()
+                Path   = $g.FullName
+                Name   = $nice
+                Source = 'WeGame'
+            }
             $count++
         }
         Write-Log "WeGame：已登记 $count 个游戏目录（来源 $wgDir）"
@@ -279,21 +300,41 @@ function Get-TargetRoots {
 
     if ($IncludeEpic -and $EpicGameDirs) {
         foreach ($ep in $EpicGameDirs) {
-            if (Test-Path $ep) { $roots += $ep }
+            if (Test-Path $ep) {
+                $items += [pscustomobject]@{
+                    Root   = $ep.TrimEnd('\').ToLowerInvariant()
+                    Path   = $ep
+                    Name   = (Split-Path $ep -Leaf)
+                    Source = 'Epic'
+                }
+            }
         }
         Write-Log "Epic：已登记 $(@($EpicGameDirs | Where-Object { Test-Path $_ }).Count) 个游戏目录"
     }
 
     foreach ($extra in $ExtraGameDirs) {
         if (Test-Path $extra) {
-            $roots += $extra
+            $items += [pscustomobject]@{
+                Root   = $extra.TrimEnd('\').ToLowerInvariant()
+                Path   = $extra
+                Name   = (Split-Path $extra -Leaf)
+                Source = 'Extra'
+            }
         } else {
             Write-Log "额外目录不存在，跳过：$extra" 'WARN'
         }
     }
 
-    # 统一成「小写 + 结尾不带反斜杠」，方便前缀匹配
-    return @($roots | ForEach-Object { $_.TrimEnd('\').ToLowerInvariant() } | Select-Object -Unique)
+    # 按路径去重（同一游戏可能被多个来源登记）
+    $seen = @{}
+    $uniq = @()
+    foreach ($it in $items) {
+        if (-not $seen.ContainsKey($it.Root)) {
+            $seen[$it.Root] = $true
+            $uniq += $it
+        }
+    }
+    return $uniq
 }
 
 function Test-TargetPath {
@@ -351,16 +392,26 @@ function Get-RunningGames {
 # ---------------------------------------------------------------- 主循环
 # 注意：用 @() 包裹，否则只有一个游戏目录时 PowerShell 会解包成字符串，
 #       导致 $roots[0] 变成首字母。
-$roots = @(Get-TargetRoots)
-if ($roots.Count -eq 0) {
+$rootItems = @(Get-TargetRoots)
+if ($rootItems.Count -eq 0) {
     Write-Log '没有找到任何可监控的游戏目录，退出。' 'ERROR'
     exit 1
 }
+# 匹配函数只需要路径；另外留一份完整信息用于展示清单
+$roots = @($rootItems | ForEach-Object { $_.Root })
 
 if ($DryRun) {
     # 自检模式：只打印解析结果，不碰 NVIDIA、不进入循环
-    Write-Log ("[DryRun] 已解析 {0} 个游戏目录：" -f $roots.Count)
-    foreach ($r in $roots) { Write-Log "    $r" }
+    Write-Log ("[DryRun] 已解析 {0} 个游戏目录：" -f $rootItems.Count)
+    foreach ($src in @('Steam', 'WeGame', 'Epic', 'Extra')) {
+        $group = @($rootItems | Where-Object { $_.Source -eq $src })
+        if ($group.Count -eq 0) { continue }
+        Write-Log ("  --- {0} ({1}) ---" -f $src, $group.Count)
+        foreach ($r in $group) {
+            Write-Log ("    {0}" -f $r.Name)
+            Write-Log ("      {0}" -f $r.Path)
+        }
+    }
 
     Write-Log '[DryRun] 扫描当前进程的匹配结果：'
     $hit = @(Get-RunningGames -Roots $roots)
