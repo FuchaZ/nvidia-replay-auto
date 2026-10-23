@@ -257,6 +257,16 @@ if ($runLevelNote -ne 'Highest') {
 # --- 立即启动一次 ---
 Write-Host ''
 Write-Host '立即启动一次（不用等下次开机）...'
+
+# 关键：先结束所有旧实例。
+#   MultipleInstances=IgnoreNew 意味着「已有实例在跑时，Start-ScheduledTask 会静默跳过」，
+#   于是你看到的还是旧进程（可能是从别的目录、旧版本的脚本启动的），
+#   新装的配置完全不生效 —— 表现为「装完了但行为没变」。
+$killed = Stop-RunningInstances
+if ($killed -gt 0) {
+    Write-Info "已结束 $killed 个旧实例"
+}
+
 Start-ScheduledTask -TaskName $TaskName
 Start-Sleep -Seconds 5
 
@@ -264,6 +274,16 @@ $running = Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorA
     Where-Object { $_.CommandLine -and $_.CommandLine -match 'NvidiaInstantReplayAuto' }
 if ($running) {
     Write-Ok "已在后台运行 (pid=$($running[0].ProcessId))"
+
+    # 校验跑的是不是「这一份」脚本，防止旧路径的实例残留造成误解
+    $cmdLine = $running[0].CommandLine
+    $expectedScript = $script
+    $actualOk = $cmdLine -and ($cmdLine -like "*$expectedScript*")
+    if (-not $actualOk) {
+        Write-Warn '检测到运行中的实例来自其他位置，可能与本次安装不一致：'
+        Write-Warn "  $cmdLine"
+        Write-Warn "  期望路径：$expectedScript"
+    }
 } else {
     Write-Warn '没有检测到运行中的实例，请查看同目录的 replay-auto.log'
 }

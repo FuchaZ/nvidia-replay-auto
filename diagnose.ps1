@@ -86,6 +86,32 @@ if ($procs.Count -eq 0) {
     foreach ($p in $procs) {
         Info ("  pid=$($p.ProcessId)")
     }
+
+    # 关键校验：跑的是不是当前目录这份脚本
+    #   计划任务允许「已有实例就不启动新的」（IgnoreNew），如果旧实例来自
+    #   别的目录（例如临时目录、升级前的旧位置），新装的配置不会生效，
+    #   但任务状态看起来一切正常 —— 极难排查。
+    $expected = Join-Path $here 'NvidiaInstantReplayAuto.ps1'
+    $mismatch = @()
+    foreach ($p in $procs) {
+        if (-not ($p.CommandLine -and $p.CommandLine -like "*$expected*")) {
+            $mismatch += $p
+        }
+    }
+    if ($mismatch.Count -gt 0) {
+        Fail '运行中的实例来自其他位置，不是当前目录这份脚本！'
+        foreach ($m in $mismatch) {
+            Info ("  pid=$($m.ProcessId)")
+            Info ("    实际: $($m.CommandLine)")
+        }
+        Info ("    期望: $expected")
+        Info '  这会导致「装完了但行为没变」。解决办法：'
+        Info '    1) 双击「点此一键卸载.bat」'
+        Info '    2) 再双击「点此一键安装.bat」'
+        $problems += '运行实例路径不一致'
+    } else {
+        Pass '运行实例路径正确（就是当前目录这份脚本）'
+    }
 }
 
 # ============================================================ 4. NVIDIA App 接口
