@@ -11,7 +11,8 @@
 #>
 [CmdletBinding()]
 param(
-    [switch]$Json
+    [switch]$Json,
+    [switch]$ScanStandalone
 )
 
 $ErrorActionPreference = 'Stop'
@@ -21,6 +22,18 @@ $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ExcludeTools = @(
     'OBS Studio', 'wallpaper_engine', 'MyDockFinder', 'Lossless Scaling',
     'Soundpad', 'Easy Cat Timer', 'Steamworks Shared'
+)
+
+# 独立目录扫描时额外排除的「不是游戏」的程序名
+$ExcludeStandaloneNames = @(
+    'teamspeak 3', 'teamspeak', 'discord', 'obs studio', 'obs',
+    'wallpaper engine', 'wallpaper_engine', 'mydockfinder',
+    'lossless scaling', 'soundpad', 'easy cat timer',
+    'steam', 'wegame', 'epic games launcher', 'battle.net',
+    'gog galaxy', 'ubisoft connect', 'ea app', 'origin',
+    'visual studio', 'python', 'nodejs', 'git',
+    'nvidia app', 'geforce experience', 'msi afterburner', 'rivatuner',
+    'chrome', 'firefox', 'edge', 'vscode'
 )
 
 $discovery = Join-Path $here 'discovery.ps1'
@@ -73,6 +86,43 @@ foreach ($wgDir in $wgDirs) {
     }
 }
 
+# ---- Standalone（非平台游戏，按盘符常见目录扫一层）----
+if ($ScanStandalone) {
+    $commonParents = @(
+        'Games', 'Game', '游戏', 'SteamLibrary', 'WeGameApps',
+        'Program Files\Games', 'Program Files (x86)\Games',
+        'Apps', 'Applications'
+    )
+    $drives = @()
+    try {
+        $drives = @(Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue |
+            Where-Object { $_.Root -match '^[A-Z]:\\$' } | Select-Object -ExpandProperty Root)
+    } catch { }
+
+    foreach ($drive in $drives) {
+        foreach ($parent in $commonParents) {
+            $base = Join-Path $drive $parent
+            if (-not (Test-Path $base)) { continue }
+            foreach ($sub in Get-ChildItem $base -Directory -ErrorAction SilentlyContinue) {
+                if ($ExcludeStandaloneNames -contains $sub.Name.ToLowerInvariant()) { continue }
+                $exes = @(Get-ChildItem $sub.FullName -Filter '*.exe' -File -ErrorAction SilentlyContinue |
+                    Where-Object {
+                        $n = $_.Name.ToLowerInvariant()
+                        $n -notmatch '^(setup|install|uninstall|repair|update|crash|bugreport|dxsetup|vcredist)' -and
+                        $n -notmatch '(setup|install|uninstall|repair|updater|crashreport|helper)$'
+                    })
+                if ($exes.Count -gt 0) {
+                    $items += [pscustomobject]@{
+                        Name   = $sub.Name
+                        Path   = $sub.FullName
+                        Source = 'Standalone'
+                    }
+                }
+            }
+        }
+    }
+}
+
 # 去重
 $seen = @{}
 $uniq = @()
@@ -103,7 +153,7 @@ if ($uniq.Count -eq 0) {
 
 Write-Host ("识别到 {0} 个游戏：" -f $uniq.Count)
 Write-Host ''
-foreach ($src in @('Steam', 'WeGame', 'Epic', 'Extra')) {
+foreach ($src in @('Steam', 'WeGame', 'Epic', 'Standalone', 'Extra')) {
     $group = @($uniq | Where-Object { $_.Source -eq $src })
     if ($group.Count -eq 0) { continue }
     Write-Host ("[{0}] 共 {1} 个" -f $src, $group.Count)

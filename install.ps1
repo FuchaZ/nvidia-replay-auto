@@ -179,10 +179,14 @@ $settings.StopIfGoingOnBatteries     = $false
 $settings.RestartInterval = 'PT1M'
 $settings.RestartCount    = 999
 
+# RunLevel Highest（最高权限）是必须的：
+#   Steam / 反作弊游戏常以管理员权限启动，普通权限的脚本读不到它们的
+#   可执行文件路径（Get-Process 的 .Path 返回 null），就会静默跳过、
+#   表现为「启动游戏没反应」。
 $principal = New-ScheduledTaskPrincipal `
     -UserId "$env:USERDOMAIN\$env:USERNAME" `
     -LogonType Interactive `
-    -RunLevel Limited
+    -RunLevel Highest
 
 Write-Host ''
 Write-Host '设置开机自动启动...'
@@ -226,7 +230,7 @@ try {
     # 用独立进程跑一次枚举，避免和已启动的后台实例抢互斥锁
     $listScript = Join-Path $here '_list-games.ps1'
     if (Test-Path $listScript) {
-        $raw = & $ps -NoProfile -ExecutionPolicy Bypass -File $listScript -Json 2>$null
+        $raw = & $ps -NoProfile -ExecutionPolicy Bypass -File $listScript -Json -ScanStandalone 2>$null
         if ($raw) {
             $parsed = $raw | ConvertFrom-Json
             $gameList = @($parsed)
@@ -244,7 +248,7 @@ if ($gameList.Count -eq 0) {
     Write-Host ("识别到 {0} 个游戏，它们启动时会自动开启即时回放：" -f $gameList.Count) -ForegroundColor Green
     Write-Host ''
 
-    foreach ($src in @('Steam', 'WeGame', 'Epic', 'Extra')) {
+    foreach ($src in @('Steam', 'WeGame', 'Epic', 'Standalone', 'Extra')) {
         $group = @($gameList | Where-Object { $_.Source -eq $src })
         if ($group.Count -eq 0) { continue }
 
@@ -274,8 +278,14 @@ Write-Host ''
 Write-Host '后台会一直运行，开机自动启动，不需要你管。' -ForegroundColor White
 Write-Host ''
 Write-Host '常用操作：' -ForegroundColor White
-Write-Host '  · 想卸载     → 双击 uninstall.bat'
-Write-Host '  · 看它认了哪些游戏 → 在本文件夹打开 PowerShell 运行：'
-Write-Host '       powershell -ExecutionPolicy Bypass -File .\NvidiaInstantReplayAuto.ps1 -DryRun'
-Write-Host '  · 看运行日志 → 同目录的 replay-auto.log'
+Write-Host '  · 想卸载     → 双击「点此一键卸载.bat」'
+Write-Host '  · 查看游戏清单 → 双击「查看游戏清单.bat」'
+Write-Host '  · 出问题排查 → 双击「出问题点这里诊断.bat」'
+Write-Host ''
+Write-Host '日志文件位置：' -ForegroundColor White
+Write-Host "  $here\replay-auto.log"
+Write-Host '  （如果这个目录不可写，会自动改写到：）'
+Write-Host "  $env:LOCALAPPDATA\NvidiaInstantReplayAuto\replay-auto.log"
+Write-Host ''
+Write-Host '日志里能看到：什么时候检测到哪个游戏、回放有没有被成功打开。' -ForegroundColor White
 Write-Host ''

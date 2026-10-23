@@ -1,11 +1,12 @@
 @echo off
 chcp 65001 >nul 2>&1
-title Nvidia Instant Replay Auto - Uninstaller
+title NVIDIA 即时回放自动开关 - 卸载
 cd /d "%~dp0"
 
 echo.
 echo ============================================
-echo   NVIDIA Instant Replay Auto - Uninstaller
+echo   NVIDIA 即时回放自动开关
+echo   卸载
 echo ============================================
 echo.
 
@@ -13,7 +14,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0install.ps1" -Uninstal
 
 echo.
 echo ============================================
-echo   Done. You can now delete this folder.
+echo   卸载完成，现在可以把这个文件夹整个删掉了
 echo ============================================
 echo.
 pause

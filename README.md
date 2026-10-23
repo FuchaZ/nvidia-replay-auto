@@ -98,7 +98,7 @@ WeGame 扫描 `rail_apps`，并排除反作弊、启动器、性能采集等辅�
 
 1. 到 [Releases](https://github.com/FuchaZ/nvidia-replay-auto/releases) 下载最新的 `.zip`
 2. 解压到任意位置（**不要在压缩包里直接运行**，要先解压）
-3. 双击 **`install.bat`**
+3. 双击 **`点此一键安装.bat`**
 4. 按提示确认即可
 
 安装脚本会自动：
@@ -132,7 +132,7 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 
 ### 卸载
 
-双击 **`uninstall.bat`**，会：
+双击 **`点此一键卸载.bat`**，会：
 
 - 删除开机自启的计划任务
 - 结束正在运行的实例
@@ -140,9 +140,24 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 
 > 卸载不会改动你的 NVIDIA App 设置。即时回放当前是什么状态，卸载后就保持什么状态。
 
+### 没生效？双击「出问题点这里诊断.bat」
+
+会逐项检查并指出问题所在：
+
+- PowerShell 版本、是否管理员权限
+- 计划任务是否存在、上次执行结果
+- 后台脚本是否真的在运行
+- NVIDIA App 接口是否连通、能否读到回放状态
+- 识别到哪些游戏
+- **权限诊断**：有多少进程读不到路径（这是「开着游戏却没反应」最常见的原因）
+- 日志文件位置与最近 10 行
+
+把输出截图发给开发者就能定位。日志默认在同目录 `replay-auto.log`；
+若目录不可写会自动改写到 `%LOCALAPPDATA%\NvidiaInstantReplayAuto\replay-auto.log`。
+
 ### 只看识别到哪些游戏（不安装）
 
-双击 `list-games.bat`，或：
+双击 `查看游戏清单.bat`，或：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\_list-games.ps1

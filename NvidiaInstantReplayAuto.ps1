@@ -51,6 +51,7 @@ param(
     [string[]]$WeGameAppsDirs = @(),
     [string[]]$ExtraGameDirs = @(),   # 其他平台的游戏目录，手动补充
     [switch]$IncludeEpic,             # 是否纳入 Epic 游戏
+    [switch]$ScanStandalone,          # 额外扫描各盘符常见游戏目录（可能误纳，需配合清单确认）
     [string[]]$ExcludeTools = @(
         'OBS Studio'          # 录屏工具，会和回放抢编码器
         'wallpaper_engine'    # 壁纸引擎，开机常驻
@@ -118,12 +119,46 @@ function Write-Log {
     #   · Write-Information 走独立的信息流，既不污染返回值，也不会报错
     Write-Information $line -InformationAction Continue
 
+    Write-LogRaw $line
+}
+
+function Write-LogRaw {
+    <#
+        写日志到文件。永不抛异常 —— 计划任务以最高权限运行时，
+        若日志目录不可写（例如放在 C:\Program Files 下），
+        不能让日志失败拖垮整个监控循环。
+    #>
+    param([string]$Line)
+
+    # 1) 轮转
     try {
-        if ((Test-Path $LogFile) -and ((Get-Item $LogFile).Length -gt 1MB)) {
-            Move-Item $LogFile "$LogFile.old" -Force
+        if ((Test-Path $LogFile) -and ((Get-Item $LogFile -ErrorAction SilentlyContinue).Length -gt 1MB)) {
+            Move-Item $LogFile "$LogFile.old" -Force -ErrorAction SilentlyContinue
         }
-        Add-Content -Path $LogFile -Value $line -Encoding utf8
     } catch { }
+
+    # 2) 主路径
+    try {
+        Add-Content -Path $LogFile -Value $Line -Encoding utf8 -ErrorAction Stop
+        return
+    } catch { }
+
+    # 3) 兜底：主路径失败时改写到 %LOCALAPPDATA%，并在控制台提示一次
+    if (-not $script:FallbackLog) {
+        $dir = Join-Path $env:LOCALAPPDATA 'NvidiaInstantReplayAuto'
+        try {
+            if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+            $script:FallbackLog = Join-Path $dir 'replay-auto.log'
+        } catch {
+            $script:FallbackLog = $null
+        }
+        if ($script:FallbackLog) {
+            Write-Information "日志目录不可写，改用：$script:FallbackLog" -InformationAction Continue
+        }
+    }
+    if ($script:FallbackLog) {
+        try { Add-Content -Path $script:FallbackLog -Value $Line -Encoding utf8 -ErrorAction SilentlyContinue } catch { }
+    }
 }
 
 # ---------------------------------------------------------------- MCP 客户端
@@ -231,6 +266,18 @@ $ExcludeFilePatterns = @(
     '*update*', '*helper*', '*service*', '*daemon*', '*download*'
 )
 
+# 独立目录扫描时额外排除的「不是游戏」的程序名（小写，精确匹配目录名）
+$ExcludeStandaloneNames = @(
+    'teamSpeak 3', 'teamspeak', 'discord', 'obs studio', 'obs',
+    'wallpaper engine', 'wallpaper_engine', 'mydockfinder',
+    'lossless scaling', 'soundpad', 'easy cat timer',
+    'steam', 'wegame', 'epic games launcher', 'battle.net',
+    'gog galaxy', 'ubisoft connect', 'ea app', 'origin',
+    'visual studio', 'python', 'nodejs', 'git',
+    'nvidia app', 'geforce experience', 'msi afterburner', 'rivatuner',
+    'chrome', 'firefox', 'edge', 'vscode'
+)
+
 function Get-TargetRoots {
     <#
         构建需要监控的游戏安装目录列表。
@@ -325,6 +372,19 @@ function Get-TargetRoots {
         }
     }
 
+    if ($ScanStandalone) {
+        $standalone = @(Get-StandaloneGameDirs)
+        foreach ($sd in $standalone) {
+            $items += [pscustomobject]@{
+                Root   = $sd.TrimEnd('\').ToLowerInvariant()
+                Path   = $sd
+                Name   = (Split-Path $sd -Leaf)
+                Source = 'Standalone'
+            }
+        }
+        Write-Log "独立安装：已登记 $($standalone.Count) 个游戏目录（按盘符常见目录扫描）"
+    }
+
     # 按路径去重（同一游戏可能被多个来源登记）
     $seen = @{}
     $uniq = @()
@@ -335,6 +395,60 @@ function Get-TargetRoots {
         }
     }
     return $uniq
+}
+
+function Get-StandaloneGameDirs {
+    <#
+        发现「不属于 Steam / WeGame / Epic」的独立安装游戏（例如官网下载的
+        三角洲行动、直接从压缩包解出来的游戏）。
+
+        做法：扫描各盘符常见游戏根目录下一层的子目录，收集候选。
+        这些目录会作为「额外监控目录」加入，但不像 Steam 那样有 appmanifest
+        可依赖，所以必须配合排除规则避免误纳工具类程序。
+
+        只扫一层，不递归全盘 —— 全盘递归太慢，且常驻脚本每秒都在跑。
+    #>
+    $result = @()
+
+    # 常见的「游戏根目录」命名
+    $commonParents = @(
+        'Games', 'Game', '游戏', 'SteamLibrary', 'WeGameApps',
+        'Program Files\Games', 'Program Files (x86)\Games',
+        'Apps', 'Applications'
+    )
+
+    # 各盘符
+    $drives = @()
+    try {
+        $drives = @(Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue |
+            Where-Object { $_.Root -match '^[A-Z]:\\$' } | Select-Object -ExpandProperty Root)
+    } catch { }
+
+    foreach ($drive in $drives) {
+        foreach ($parent in $commonParents) {
+            $base = Join-Path $drive $parent
+            if (-not (Test-Path $base)) { continue }
+
+            foreach ($sub in Get-ChildItem $base -Directory -ErrorAction SilentlyContinue) {
+                # 名字在黑名单里 → 不是游戏
+                if ($ExcludeStandaloneNames -contains $sub.Name.ToLowerInvariant()) { continue }
+
+                # 判断这个子目录里是否有「看起来像游戏主程序」的 exe
+                $exes = @(Get-ChildItem $sub.FullName -Filter '*.exe' -File -ErrorAction SilentlyContinue |
+                    Where-Object {
+                        $n = $_.Name.ToLowerInvariant()
+                        # 排除安装/卸载/崩溃/辅助类
+                        $n -notmatch '^(setup|install|uninstall|repair|update|crash|bugreport|dxsetup|vcredist)' -and
+                        $n -notmatch '(setup|install|uninstall|repair|updater|crashreport|helper)$'
+                    })
+                if ($exes.Count -gt 0) {
+                    $result += $sub.FullName
+                }
+            }
+        }
+    }
+
+    return $result
 }
 
 function Test-TargetPath {
@@ -370,15 +484,20 @@ function Test-TargetPath {
 function Get-RunningGames {
     <#
         扫描当前进程，返回落在目标目录里的游戏进程。
-        只枚举一次 Get-Process；读不到的 Path（系统进程无权限）直接跳过。
+
+        读不到 Path 的进程会被跳过并计入 $script:LastScanNoPath：
+        这类进程通常是「以管理员权限运行、而本脚本只有普通权限」的情况，
+        是「明明开着游戏却没反应」的最常见原因，所以要把数量记下来供日志与诊断使用。
     #>
     param([string[]]$Roots)
 
     $found = @()
+    $noPath = 0
+
     foreach ($p in Get-Process) {
         $path = $null
-        try { $path = $p.Path } catch { continue }
-        if (-not $path) { continue }
+        try { $path = $p.Path } catch { $noPath++; continue }
+        if (-not $path) { $noPath++; continue }
         if (Test-TargetPath -Path $path -Roots $Roots) {
             $found += [pscustomobject]@{
                 Name = $p.ProcessName
@@ -386,6 +505,8 @@ function Get-RunningGames {
             }
         }
     }
+
+    $script:LastScanNoPath = $noPath
     return $found
 }
 
@@ -403,7 +524,7 @@ $roots = @($rootItems | ForEach-Object { $_.Root })
 if ($DryRun) {
     # 自检模式：只打印解析结果，不碰 NVIDIA、不进入循环
     Write-Log ("[DryRun] 已解析 {0} 个游戏目录：" -f $rootItems.Count)
-    foreach ($src in @('Steam', 'WeGame', 'Epic', 'Extra')) {
+    foreach ($src in @('Steam', 'WeGame', 'Epic', 'Standalone', 'Extra')) {
         $group = @($rootItems | Where-Object { $_.Source -eq $src })
         if ($group.Count -eq 0) { continue }
         Write-Log ("  --- {0} ({1}) ---" -f $src, $group.Count)
@@ -419,6 +540,14 @@ if ($DryRun) {
         Write-Log '    （当前没有游戏在运行）'
     } else {
         foreach ($h in $hit) { Write-Log ("    ✓ {0}  <-  {1}" -f $h.Name, $h.Path) }
+    }
+
+    # 权限诊断：读不到路径的进程数很关键
+    $totalProc = @(Get-Process).Count
+    Write-Log ("[DryRun] 权限检查：共 {0} 个进程，其中 {1} 个读不到可执行路径" -f $totalProc, $script:LastScanNoPath)
+    if ($script:LastScanNoPath -gt ($totalProc * 0.4)) {
+        Write-Log '    读不到路径的比例偏高 —— 若此时确实开着游戏却没识别，就是权限问题。' 'WARN'
+        Write-Log '    解决办法：以管理员身份重新运行（计划任务设为「使用最高权限运行」）。' 'WARN'
     }
 
     Write-Log '[DryRun] 抽查：确认辅助程序会被正确排除'

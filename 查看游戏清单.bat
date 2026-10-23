@@ -1,6 +1,6 @@
 @echo off
 chcp 65001 >nul 2>&1
-title Nvidia Instant Replay Auto - Game List
+title NVIDIA 即时回放自动开关 - 游戏清单
 cd /d "%~dp0"
 
 echo.
