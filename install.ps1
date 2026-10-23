@@ -280,8 +280,13 @@ try {
     if (Test-Path $listScript) {
         $raw = & $ps -NoProfile -ExecutionPolicy Bypass -File $listScript -Json -ScanStandalone 2>$null
         if ($raw) {
-            $parsed = $raw | ConvertFrom-Json
-            $gameList = @($parsed)
+            # PS 5.1 的 ConvertFrom-Json 对顶层数组会逐个输出；单元素时会嵌套
+            $parsed = @($raw | ConvertFrom-Json)
+            if ($parsed.Count -eq 1 -and $parsed[0] -is [array]) {
+                $gameList = @($parsed[0])
+            } else {
+                $gameList = $parsed
+            }
         }
     }
 } catch {

@@ -151,7 +151,16 @@ $games = @()
 if (Test-Path $listScript) {
     try {
         $raw = & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File $listScript -Json 2>$null
-        if ($raw) { $games = @($raw | ConvertFrom-Json) }
+        if ($raw) {
+            # PS 5.1 的 ConvertFrom-Json 对顶层数组会逐个输出，需要用 @() 收集
+            $parsed = @($raw | ConvertFrom-Json)
+            # 如果只有一项且自身是数组（ConvertFrom-Json 的嵌套行为），展开它
+            if ($parsed.Count -eq 1 -and $parsed[0] -is [array]) {
+                $games = @($parsed[0])
+            } else {
+                $games = $parsed
+            }
+        }
     } catch { }
 }
 
