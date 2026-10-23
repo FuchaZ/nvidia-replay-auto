@@ -1,0 +1,12 @@
+# 日志
+*.log
+*.log.old
+*.log.*
+
+# 计划任务备份
+*.xml.bak
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
