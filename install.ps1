@@ -3,8 +3,8 @@
     一键安装 / 卸载 NvidiaInstantReplayAuto 的开机自启。
 
 .DESCRIPTION
-    双击 install.bat   → 安装
-    双击 uninstall.bat → 卸载
+    双击「点此一键安装.bat」 → 安装
+    双击「点此一键卸载.bat」 → 卸载
 
     安装后会注册一个「用户登录时自动启动」的计划任务，
     所以以后开机登录就会自动运行，不需要手动开。
@@ -39,9 +39,21 @@ function Write-Warn($msg) { Write-Host "  [!] $msg"    -ForegroundColor Yellow }
 function Write-Err($msg)  { Write-Host "  [X] $msg"    -ForegroundColor Red }
 
 function Stop-RunningInstances {
+    # 必须同时匹配 powershell.exe 和 pwsh.exe：
+    # README 教用户用 pwsh 跑脚本，只匹配 powershell.exe 会漏掉这些实例，
+    # 导致「卸载报没有实例，但 pwsh 进程仍在后台开关回放」。
+    #
+    # 判据要精确到「-File 指向的那份脚本文件名」，不能用 -match 'NvidiaInstantReplayAuto'：
+    # 那样会把任何命令行里含这个字符串的进程（编辑器、终端命令）一起误杀。
     $n = 0
-    Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
-        Where-Object { $_.CommandLine -and $_.CommandLine -match 'NvidiaInstantReplayAuto' } |
+    Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+        Where-Object {
+            if ($_.Name -notin @('powershell.exe', 'pwsh.exe')) { return $false }
+            if (-not $_.CommandLine) { return $false }
+            # 只认 -File "....\NvidiaInstantReplayAuto.ps1"
+            if ($_.CommandLine -notmatch '-File\s+"?([^"]+?\.ps1)') { return $false }
+            return ((Split-Path $Matches[1] -Leaf) -eq 'NvidiaInstantReplayAuto.ps1')
+        } |
         ForEach-Object {
             Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
             $n++
@@ -172,8 +184,11 @@ $settings = New-ScheduledTaskSettingsSet `
     -AllowStartIfOnBatteries `
     -DontStopIfGoingOnBatteries `
     -StartWhenAvailable `
-    -ExecutionTimeLimit ([TimeSpan]::Zero) `
     -MultipleInstances IgnoreNew
+# 「永不超时」：显式写成一个极大值，而不是 [TimeSpan]::Zero。
+# Zero 在多数系统上等同于无限制（本机实测任务连续跑 55 分钟未被终止），
+# 但不同版本的任务计划程序对 PT0S 的解读并不统一，显式给大值更稳。
+$settings.ExecutionTimeLimit        = 'P365D'
 $settings.DisallowStartIfOnBatteries = $false
 $settings.StopIfGoingOnBatteries     = $false
 $settings.RestartInterval = 'PT1M'
@@ -270,8 +285,13 @@ if ($killed -gt 0) {
 Start-ScheduledTask -TaskName $TaskName
 Start-Sleep -Seconds 5
 
-$running = Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
-    Where-Object { $_.CommandLine -and $_.CommandLine -match 'NvidiaInstantReplayAuto' }
+$running = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+    Where-Object {
+        if ($_.Name -notin @('powershell.exe', 'pwsh.exe')) { return $false }
+        if (-not $_.CommandLine) { return $false }
+        if ($_.CommandLine -notmatch '-File\s+"?([^"]+?\.ps1)') { return $false }
+        return ((Split-Path $Matches[1] -Leaf) -eq 'NvidiaInstantReplayAuto.ps1')
+    }
 if ($running) {
     Write-Ok "已在后台运行 (pid=$($running[0].ProcessId))"
 
@@ -295,10 +315,12 @@ Write-Host ''
 
 $gameList = @()
 try {
-    # 用独立进程跑一次枚举，避免和已启动的后台实例抢互斥锁
+    # 用独立进程跑一次枚举，避免和已启动的后台实例抢互斥锁。
+    # 不带任何参数 —— 扫描范围由 settings.conf 决定，主程序运行时读的是同一份，
+    # 所以这里显示的就是运行时真正会监控的集合。
     $listScript = Join-Path $here '_list-games.ps1'
     if (Test-Path $listScript) {
-        $raw = & $ps -NoProfile -ExecutionPolicy Bypass -File $listScript -Json -ScanStandalone 2>$null
+        $raw = & $ps -NoProfile -ExecutionPolicy Bypass -File $listScript -Json 2>$null
         if ($raw) {
             # PS 5.1 的 ConvertFrom-Json 对顶层数组会逐个输出；单元素时会嵌套
             $parsed = @($raw | ConvertFrom-Json)
@@ -332,8 +354,8 @@ if ($gameList.Count -eq 0) {
         Write-Host ''
     }
 
-    Write-Host '  如果这里有你不希望被监控的程序，可以双击 uninstall.bat 卸载，' -ForegroundColor Yellow
-    Write-Host '  或参考 README 用 -ExcludeTools 参数排除。' -ForegroundColor Yellow
+    Write-Host '  如果这里有你不希望被监控的程序，可以在 settings.conf 里调整扫描范围，' -ForegroundColor Yellow
+    Write-Host '  或双击「点此一键卸载.bat」卸载。' -ForegroundColor Yellow
     Write-Host ''
 }
 

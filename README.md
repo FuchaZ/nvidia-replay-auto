@@ -185,26 +185,37 @@ WeGame：已登记 1 个游戏目录（来源 D:\WeGameApps\rail_apps）
 [DryRun] 抽查结果：7/7 通过
 ```
 
+## 配置：settings.conf
+
+运行参数写在同目录的 `settings.conf` 里。**这是唯一的配置来源**——主程序、清单工具、诊断工具、安装器都读它，所以「安装时看到的游戏清单」和「运行时真正监控的集合」永远一致。
+
+```ini
+# 是否扫描各盘符的常见游戏目录（Games / 游戏 / WeGameApps 等），
+# 用来识别不是从 Steam / WeGame 安装的独立游戏
+ScanStandalone = true
+
+# 是否纳入 Epic 游戏
+IncludeEpic = false
+
+# 进程扫描间隔（秒）
+PollSeconds = 3
+
+# 游戏退出后是否自动关闭回放（只关闭本工具开启的）
+AutoDisableOnExit = true
+```
+
+改完保存后，重新双击「点此一键安装.bat」即可生效（或结束正在运行的实例后重新启动）。
+
 ## 命令行参数
 
-```powershell
-# 游戏退出后不关闭回放（只负责开）
-.\NvidiaInstantReplayAuto.ps1 -NoAutoDisable
+仅供调试时临时覆盖配置，日常用 `settings.conf` 就行：
 
-# 只检查一次，不做任何更改
+```powershell
+# 只检查一次，打印会监控哪些游戏、并跑自检用例（不碰 NVIDIA）
 .\NvidiaInstantReplayAuto.ps1 -DryRun
 
-# 手动指定 Steam 库（默认自动探测）
-.\NvidiaInstantReplayAuto.ps1 -SteamAppsDirs 'D:\SteamLibrary\steamapps'
-
-# 纳入 Epic 游戏
-.\NvidiaInstantReplayAuto.ps1 -IncludeEpic
-
-# 补充其他平台的游戏目录
-.\NvidiaInstantReplayAuto.ps1 -ExtraGameDirs 'E:\Games\SomeGame'
-
-# 追加排除项
-.\NvidiaInstantReplayAuto.ps1 -ExcludeTools 'MyTool'
+# 临时强制游戏退出后不关闭回放
+.\NvidiaInstantReplayAuto.ps1 -NoAutoDisable
 ```
 
 ## 工作日志
@@ -253,10 +264,22 @@ WeGame：已登记 1 个游戏目录（来源 D:\WeGameApps\rail_apps）
 `install.ps1` 会实际运行一次探针检测可用性；万一未来不可用，会**自动回退**为直接调用
 `powershell.exe`（功能正常，只是黑窗会回来）。
 
+## 资源占用
+
+实测（本机 374 个进程）：
+
+| 项目 | 耗时 |
+|---|---|
+| `Get-Process` 枚举 | ~6 ms |
+| 加上逐个读取可执行路径 | ~45 ms |
+| 实际轮询间隔 | 3 秒（可改 `settings.conf` 的 `PollSeconds`） |
+
+即约 1.5% 单核占用，且**只在扫描进程列表**，不碰 GPU、不碰磁盘。
+只有游戏启动/退出那一刻才会调用 NVIDIA 接口。
+
 ## 已知限制
 
-- 只支持 NVIDIA App **11.0.9.5xx+**（更早的 GeForce Experience 没有 MCP 接口）
-- 需要 NVIDIA App 在运行。若它完全退出，日志会记录「读取回放状态失败」
+- 只支持 NVIDIA App **11.0.9.5xx+**（更早的 GeForce Experience 没有 MCP 接口）- 需要 NVIDIA App 在运行。若它完全退出，日志会记录「读取回放状态失败」
 - 远程控制/串流软件（如 GameViewer、ToDesk）运行时会触发 NVIDIA 的
   「受保护内容」检测，导致回放被系统强制关闭。这是 NVIDIA 的行为，脚本无法绕过
 - 混合显卡笔记本上若回放不稳定，可尝试关闭 NVIDIA App 的「桌面捕获」

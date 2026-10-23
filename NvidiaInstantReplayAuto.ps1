@@ -1,38 +1,26 @@
 ﻿<#
 .SYNOPSIS
-    游戏启动前自动确认 NVIDIA「即时回放」已开启，游戏退出后自动关闭。
+    游戏启动前自动确认 NVIDIA「即时回放」(Instant Replay) 已开启，游戏退出后自动关闭。
 
 .DESCRIPTION
-    后台常驻，按「安装路径」识别游戏，而不是写死进程名：
-
-      · Steam  → 读取 steamapps 下的 appmanifest_*.acf，只认真正已安装的游戏，
-                 自动跳过 OBS Studio / Wallpaper Engine / MyDockFinder 等工具类程序
-      · WeGame → 扫描 rail_apps 下每个游戏目录，排除反作弊、启动器、性能采集等辅助程序
+    按「安装路径」识别游戏，而不是写死进程名（Steam / WeGame / Epic / 独立安装）。
+    运行参数全部来自同目录 settings.conf；游戏枚举由 discovery.ps1 的
+    Get-GameRootItems 提供 —— 主程序、清单工具、诊断、安装器共用同一份实现，
+    因此「安装时打印的清单」「诊断显示的清单」「运行时真正监控的集合」三者永远一致。
 
     行为（刻意做得很少，避免覆盖你的手动操作）：
-      1. 检测到游戏启动 → 读一次回放状态；关着就开，已开着就什么都不做
+      1. 检测到游戏启动 → 读一次回放状态；关着才开，已开着就什么都不做
       2. 游戏进行中     → 完全不干预（不查询、不切换）
-      3. 检测到游戏退出 → 只有当回放是「本脚本开启的」时才关闭
+      3. 检测到游戏退出 → 只有当回放是「本脚本确认开启成功的」时才关闭
 
-    第 3 条是关键：如果游戏启动前回放就已经开着（你自己开的），退出后脚本不会去关它，
-    这样你的手动设置永远是最高优先级。
-
-    通过 NVIDIA App 自带的本地 MCP 服务 (http://127.0.0.1:13508/mcp) 控制，不需要第三方 EXE。
-
-.PARAMETER SteamAppsDirs
-    Steam 的 steamapps 目录，可多个（多库场景）。默认 D:\Steam\steamapps。
-
-.PARAMETER WeGameAppsDirs
-    WeGame 的游戏根目录。默认 D:\WeGameApps\rail_apps。
-
-.PARAMETER ExcludeTools
-    Steam 目录里要额外排除的非游戏程序（按 installdir 名字比对）。
-
-.PARAMETER PollSeconds
-    进程扫描间隔（秒）。路径扫描约 100~150ms，默认 3 秒足够且几乎不占资源。
+    通过 NVIDIA App 自带的本地 MCP 服务 (http://127.0.0.1:13508/mcp) 控制，
+    不需要第三方 EXE，不注入进程，也不模拟按键。
 
 .PARAMETER NoAutoDisable
-    游戏退出后不自动关闭回放。
+    强制游戏退出后不关闭回放（覆盖 settings.conf 的 AutoDisableOnExit）。
+
+.PARAMETER DryRun
+    自检模式：只打印解析结果与抽查用例，不碰 NVIDIA、不进入循环。
 
 .PARAMETER LogFile
     日志路径，默认脚本同目录 replay-auto.log。
@@ -41,27 +29,11 @@
     pwsh -File .\NvidiaInstantReplayAuto.ps1
 
 .EXAMPLE
-    # 只观察不关闭，并额外排除某个程序
-    pwsh -File .\NvidiaInstantReplayAuto.ps1 -NoAutoDisable -ExcludeTools 'Easy Cat Timer'
+    # 先看会监控哪些游戏、有没有被误排除
+    pwsh -File .\NvidiaInstantReplayAuto.ps1 -DryRun
 #>
 [CmdletBinding()]
 param(
-    # 留空则自动探测。显式指定时以指定的为准。
-    [string[]]$SteamAppsDirs = @(),
-    [string[]]$WeGameAppsDirs = @(),
-    [string[]]$ExtraGameDirs = @(),   # 其他平台的游戏目录，手动补充
-    [switch]$IncludeEpic,             # 是否纳入 Epic 游戏
-    [switch]$ScanStandalone,          # 额外扫描各盘符常见游戏目录（可能误纳，需配合清单确认）
-    [string[]]$ExcludeTools = @(
-        'OBS Studio'          # 录屏工具，会和回放抢编码器
-        'wallpaper_engine'    # 壁纸引擎，开机常驻
-        'MyDockFinder'        # 桌面美化，开机常驻
-        'Lossless Scaling'    # 补帧工具
-        'Soundpad'            # 变声/音板
-        'Easy Cat Timer'      # 番茄钟小工具
-        'Steamworks Shared'   # 公共运行库，不是游戏
-    ),
-    [int]$PollSeconds = 3,
     [switch]$NoAutoDisable,
     [switch]$DryRun,
     [string]$LogFile
@@ -73,27 +45,15 @@ Add-Type -AssemblyName System.Net.Http | Out-Null
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 if (-not $LogFile) { $LogFile = Join-Path $ScriptDir 'replay-auto.log' }
 
-# ---------------------------------------------------------------- 自动探测游戏库
-# 参数留空时自动发现 Steam / WeGame（可选 Epic）的游戏目录，
-# 这样整个文件夹拷到别的电脑也能直接用，不需要改路径。
+# ---------------------------------------------------------------- 共享工具 + 运行参数
 $discovery = Join-Path $ScriptDir 'discovery.ps1'
-$EpicGameDirs = @()
-
-if (Test-Path $discovery) {
-    . $discovery
-
-    if (-not $SteamAppsDirs -or $SteamAppsDirs.Count -eq 0) {
-        $SteamAppsDirs = @(Get-SteamLibraryDirs)
-    }
-    if (-not $WeGameAppsDirs -or $WeGameAppsDirs.Count -eq 0) {
-        $WeGameAppsDirs = @(Get-WeGameGameDirs)
-    }
-    if ($IncludeEpic) {
-        $EpicGameDirs = @(Get-EpicGameDirs)
-    }
-} else {
-    Write-Information "未找到 discovery.ps1，跳过自动探测（需手动指定目录参数）" -InformationAction Continue
+if (-not (Test-Path $discovery)) {
+    Write-Error "缺少 discovery.ps1（应与本脚本同目录），无法继续。"
+    exit 1
 }
+. $discovery
+
+$Settings = Get-Settings -Dir $ScriptDir
 
 # ---------------------------------------------------------------- 单实例
 $mutex = $null
@@ -104,19 +64,18 @@ try {
         exit 0
     }
 } catch {
+    # 拿不到 Global\ 互斥体时降级为「无单实例保护」，但必须留下痕迹：
+    # 否则两个实例并发会一个开一个关，互相打架且毫无日志可查。
     $mutex = $null
+    Write-Information "[WARN] 无法创建全局互斥体（$($_.Exception.Message)），单实例保护失效" -InformationAction Continue
 }
 
 function Write-Log {
     param([string]$Message, [string]$Level = 'INFO')
     $line = '{0} [{1}] {2}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Level, $Message
 
-    # 用 Write-Information 而不是 Write-Host / Write-Output：
-    #   · Write-Host 在无控制台的计划任务里写到看不见的窗口，且无法重定向
-    #   · Write-Output 会混进函数的返回值管道 —— 本函数被 Get-TargetRoots 等
-    #     「有意返回数组」的函数调用，一旦用 Write-Output 就会把日志字符串
-    #     一起塞进返回数组（曾导致游戏目录从 17 个变成 19 个）
-    #   · Write-Information 走独立的信息流，既不污染返回值，也不会报错
+    # 用 Write-Information：Write-Host 在无控制台计划任务里写进看不见的窗口，
+    # Write-Output 会污染「有意返回数组」的函数返回值（曾导致游戏目录多出日志字符串）。
     Write-Information $line -InformationAction Continue
 
     Write-LogRaw $line
@@ -124,26 +83,22 @@ function Write-Log {
 
 function Write-LogRaw {
     <#
-        写日志到文件。永不抛异常 —— 计划任务以最高权限运行时，
-        若日志目录不可写（例如放在 C:\Program Files 下），
-        不能让日志失败拖垮整个监控循环。
+        写日志到文件。永不抛异常 —— 目录不可写时改写到 %LOCALAPPDATA%，
+        再失败就静默丢弃，总之不能拖垮监控循环。
     #>
     param([string]$Line)
 
-    # 1) 轮转
     try {
         if ((Test-Path $LogFile) -and ((Get-Item $LogFile -ErrorAction SilentlyContinue).Length -gt 1MB)) {
             Move-Item $LogFile "$LogFile.old" -Force -ErrorAction SilentlyContinue
         }
     } catch { }
 
-    # 2) 主路径
     try {
         Add-Content -Path $LogFile -Value $Line -Encoding utf8 -ErrorAction Stop
         return
     } catch { }
 
-    # 3) 兜底：主路径失败时改写到 %LOCALAPPDATA%，并在控制台提示一次
     if (-not $script:FallbackLog) {
         $dir = Join-Path $env:LOCALAPPDATA 'NvidiaInstantReplayAuto'
         try {
@@ -164,19 +119,19 @@ function Write-LogRaw {
 # ---------------------------------------------------------------- MCP 客户端
 # 走「无状态」调用：跳过 initialize，直接 POST tools/call。
 #   - NVIDIA 的 initialize 会占会话槽位，槽位满后返回 503 "Too many active sessions"，
-#     而且空闲会话很久不回收。常驻脚本绝不能那样用，否则会把自己和别的客户端一起锁死。
-#   - 无状态调用对 status / toggle_instant_replay 均可正常读取状态与切换。
+#     而且空闲会话很久不回收。常驻脚本绝不能那样用。
+#   - 无状态调用对 status / toggle_instant_replay 均可正常读取与切换。
 $McpUri = 'http://127.0.0.1:13508/mcp'
 $script:Http = New-Object System.Net.Http.HttpClient
 $script:Http.Timeout = [TimeSpan]::FromSeconds(15)
 $script:LastCallAt = [datetime]::MinValue
 $script:MinCallGapSeconds = 3   # 两次 MCP 调用的最小间隔，避免触发 Rate limit
+$script:LastScanNoPath = 0
 
 function Invoke-McpTool {
     param([string]$ToolName, [hashtable]$Arguments = @{})
 
-    # NVIDIA 的 MCP 有频率限制（"Rate limited: too many tool calls. Try again in 20s."），
-    # 所以这里做全局节流：任意两次调用之间至少间隔 MinCallGapSeconds。
+    # 全局节流：任意两次调用至少间隔 MinCallGapSeconds。
     $since = ((Get-Date) - $script:LastCallAt).TotalSeconds
     if ($since -lt $script:MinCallGapSeconds) {
         Start-Sleep -Milliseconds ([int](($script:MinCallGapSeconds - $since) * 1000))
@@ -189,6 +144,8 @@ function Invoke-McpTool {
         params  = @{ name = $ToolName; arguments = $Arguments }
     } | ConvertTo-Json -Depth 8 -Compress
 
+    $resp = $null
+    $req = $null
     try {
         $req = New-Object System.Net.Http.HttpRequestMessage([System.Net.Http.HttpMethod]::Post, $McpUri)
         $req.Content = New-Object System.Net.Http.StringContent($body, [System.Text.Encoding]::UTF8, 'application/json')
@@ -201,6 +158,9 @@ function Invoke-McpTool {
         return $null
     }
     finally {
+        # 常驻进程必须及时释放请求/响应，否则 socket 缓慢堆积
+        if ($resp) { try { $resp.Dispose() } catch { } }
+        if ($req) { try { $req.Dispose() } catch { } }
         $script:LastCallAt = Get-Date
     }
 
@@ -212,7 +172,7 @@ function Invoke-McpTool {
     if (-not $payload -and $text.TrimStart().StartsWith('{')) { $payload = $text }
 
     if (-not $payload) {
-        Write-Log "MCP 响应无法解析：HTTP $([int]$resp.StatusCode) $text" 'WARN'
+        Write-Log "MCP 响应无法解析：$text" 'WARN'
         return $null
     }
 
@@ -224,7 +184,7 @@ function Invoke-McpTool {
             Start-Sleep -Seconds $wait
             return $null
         }
-        Write-Log "MCP 工具报错 ($ToolName)：$($j.error.message)" 'WARN'
+        Write-Log "MCP 协议错误 ($ToolName)：$($j.error.message)" 'WARN'
         return $null
     }
     return $j.result
@@ -232,224 +192,49 @@ function Invoke-McpTool {
 
 function Get-ReplayState {
     $res = Invoke-McpTool -ToolName 'nvapp_overlay_get_status'
-    if (-not $res -or -not $res.structuredContent) { return $null }
-    return [pscustomobject]@{
-        ReplayOk = [bool]$res.structuredContent.instantReplayEnabled
-    }
+    if (-not $res -or $res.isError -or -not $res.structuredContent) { return $null }
+    return [bool]$res.structuredContent.instantReplayEnabled
 }
 
 function Set-Replay {
+    <#
+        设置回放状态，并回读确认真的生效，返回是否成功。
+        关键：实测发现 NVIDIA 的 MCP 业务失败时返回的是 result.isError=true
+        （而不是 jsonrpc 层的 error），且有时返回 "turned on" 却并未真正开启。
+        所以只看「有没有 result」是不可信的 —— 必须以「回读 == 目标」为唯一判据。
+    #>
     param([bool]$Enable)
+
     $res = Invoke-McpTool -ToolName 'nvapp_overlay_capture' -Arguments @{
         action = 'toggle_instant_replay'
         enable = $Enable
     }
-    return ($null -ne $res)
+
+    if ($null -eq $res) { return $false }
+    if ($res.isError) {
+        $msg = ''
+        if ($res.content) { $msg = (@($res.content) | ForEach-Object { $_.text }) -join ' ' }
+        Write-Log "切换回放被拒绝：$msg" 'WARN'
+        return $false
+    }
+
+    # 回读确认，对付「假成功」
+    Start-Sleep -Milliseconds 1200
+    $actual = Get-ReplayState
+    if ($null -eq $actual) {
+        Write-Log '切换后无法回读状态，按失败处理' 'WARN'
+        return $false
+    }
+    if ($actual -ne $Enable) {
+        Write-Log ("切换后回读为 {0}，与期望 {1} 不符，按失败处理" -f $actual, $Enable) 'WARN'
+        return $false
+    }
+    return $true
 }
 
-# ---------------------------------------------------------------- 目标路径
-# 排除：路径中任意一级目录命中这些名字（游戏自带的辅助程序）
-$ExcludeDirSegments = @(
-    'AntiCheatExpert'   # ACE 反作弊，常驻服务
-    'Metaperf'          # 性能采集
-    'Redist'            # 运行库安装包
-    'WeGameLauncher'    # WeGame 启动器
-    'tinydl'            # WeGame 下载器
-    '_CommonRedist'
-    'Steamworks Shared'
-)
-
-# 排除：文件名命中这些模式（卸载/崩溃/安装/更新等辅助程序）
-$ExcludeFilePatterns = @(
-    '*卸载*', '*uninstall*', '*bugreport*', '*crashreport*', '*crashreportclient*',
-    '*setup*', '*prereq*', '*vcredist*', '*dxsetup*', '*repair*',
-    '*update*', '*helper*', '*service*', '*daemon*', '*download*'
-)
-
-# 独立目录扫描时额外排除的「不是游戏」的程序名（小写，精确匹配目录名）
-$ExcludeStandaloneNames = @(
-    'teamSpeak 3', 'teamspeak', 'discord', 'obs studio', 'obs',
-    'wallpaper engine', 'wallpaper_engine', 'mydockfinder',
-    'lossless scaling', 'soundpad', 'easy cat timer',
-    'steam', 'wegame', 'epic games launcher', 'battle.net',
-    'gog galaxy', 'ubisoft connect', 'ea app', 'origin',
-    'visual studio', 'python', 'nodejs', 'git',
-    'nvidia app', 'geforce experience', 'msi afterburner', 'rivatuner',
-    'chrome', 'firefox', 'edge', 'vscode'
-)
-
-function Get-TargetRoots {
-    <#
-        构建需要监控的游戏安装目录列表。
-        Steam：只取 appmanifest 登记过的游戏，天然过滤掉残留目录和工具类程序
-        WeGame：取 rail_apps 下每个游戏目录
-        Epic  ：取清单里登记的安装目录（需 -IncludeEpic）
-        其余 ：由 -ExtraGameDirs 手动补充
-
-        返回对象数组，每项含：
-          Root  - 小写、末尾无反斜杠的路径（用于前缀匹配）
-          Path  - 原始大小写路径（用于展示）
-          Name  - 给人看的名称
-          Source- Steam / WeGame / Epic / Extra
-    #>
-    $items = @()
-
-    foreach ($appsDir in $SteamAppsDirs) {
-        if (-not (Test-Path $appsDir)) {
-            Write-Log "Steam 目录不存在，跳过：$appsDir" 'WARN'
-            continue
-        }
-        $commonDir = Join-Path $appsDir 'common'
-        $count = 0
-        foreach ($acf in Get-ChildItem $appsDir -Filter 'appmanifest_*.acf' -File -ErrorAction SilentlyContinue) {
-            $raw = Get-Content $acf.FullName -Raw -ErrorAction SilentlyContinue
-            if (-not ($raw -match '"installdir"\s+"([^"]+)"')) { continue }
-
-            $installDir = $Matches[1]
-            if ($ExcludeTools -contains $installDir) { continue }
-
-            $displayName = $installDir
-            if ($raw -match '"name"\s+"([^"]+)"') { $displayName = $Matches[1] }
-
-            $full = Join-Path $commonDir $installDir
-            if (Test-Path $full) {
-                $items += [pscustomobject]@{
-                    Root   = $full.TrimEnd('\').ToLowerInvariant()
-                    Path   = $full
-                    Name   = $displayName
-                    Source = 'Steam'
-                }
-                $count++
-            }
-        }
-        Write-Log "Steam：已登记 $count 个游戏目录（来源 $appsDir）"
-    }
-
-    foreach ($wgDir in $WeGameAppsDirs) {
-        if (-not (Test-Path $wgDir)) {
-            Write-Log "WeGame 目录不存在，跳过：$wgDir" 'WARN'
-            continue
-        }
-        $count = 0
-        foreach ($g in Get-ChildItem $wgDir -Directory -ErrorAction SilentlyContinue) {
-            # 目录名形如 DeltaForce(2001918)，去掉括号里的 appid 更好看
-            $nice = $g.Name -replace '\(\d+\)\s*$', ''
-            $items += [pscustomobject]@{
-                Root   = $g.FullName.TrimEnd('\').ToLowerInvariant()
-                Path   = $g.FullName
-                Name   = $nice
-                Source = 'WeGame'
-            }
-            $count++
-        }
-        Write-Log "WeGame：已登记 $count 个游戏目录（来源 $wgDir）"
-    }
-
-    if ($IncludeEpic -and $EpicGameDirs) {
-        foreach ($ep in $EpicGameDirs) {
-            if (Test-Path $ep) {
-                $items += [pscustomobject]@{
-                    Root   = $ep.TrimEnd('\').ToLowerInvariant()
-                    Path   = $ep
-                    Name   = (Split-Path $ep -Leaf)
-                    Source = 'Epic'
-                }
-            }
-        }
-        Write-Log "Epic：已登记 $(@($EpicGameDirs | Where-Object { Test-Path $_ }).Count) 个游戏目录"
-    }
-
-    foreach ($extra in $ExtraGameDirs) {
-        if (Test-Path $extra) {
-            $items += [pscustomobject]@{
-                Root   = $extra.TrimEnd('\').ToLowerInvariant()
-                Path   = $extra
-                Name   = (Split-Path $extra -Leaf)
-                Source = 'Extra'
-            }
-        } else {
-            Write-Log "额外目录不存在，跳过：$extra" 'WARN'
-        }
-    }
-
-    if ($ScanStandalone) {
-        $standalone = @(Get-StandaloneGameDirs)
-        foreach ($sd in $standalone) {
-            $items += [pscustomobject]@{
-                Root   = $sd.TrimEnd('\').ToLowerInvariant()
-                Path   = $sd
-                Name   = (Split-Path $sd -Leaf)
-                Source = 'Standalone'
-            }
-        }
-        Write-Log "独立安装：已登记 $($standalone.Count) 个游戏目录（按盘符常见目录扫描）"
-    }
-
-    # 按路径去重（同一游戏可能被多个来源登记）
-    $seen = @{}
-    $uniq = @()
-    foreach ($it in $items) {
-        if (-not $seen.ContainsKey($it.Root)) {
-            $seen[$it.Root] = $true
-            $uniq += $it
-        }
-    }
-    return $uniq
-}
-
-function Get-StandaloneGameDirs {
-    <#
-        发现「不属于 Steam / WeGame / Epic」的独立安装游戏（例如官网下载的
-        三角洲行动、直接从压缩包解出来的游戏）。
-
-        做法：扫描各盘符常见游戏根目录下一层的子目录，收集候选。
-        这些目录会作为「额外监控目录」加入，但不像 Steam 那样有 appmanifest
-        可依赖，所以必须配合排除规则避免误纳工具类程序。
-
-        只扫一层，不递归全盘 —— 全盘递归太慢，且常驻脚本每秒都在跑。
-    #>
-    $result = @()
-
-    # 常见的「游戏根目录」命名
-    $commonParents = @(
-        'Games', 'Game', '游戏', 'SteamLibrary', 'WeGameApps',
-        'Program Files\Games', 'Program Files (x86)\Games',
-        'Apps', 'Applications'
-    )
-
-    # 各盘符
-    $drives = @()
-    try {
-        $drives = @(Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue |
-            Where-Object { $_.Root -match '^[A-Z]:\\$' } | Select-Object -ExpandProperty Root)
-    } catch { }
-
-    foreach ($drive in $drives) {
-        foreach ($parent in $commonParents) {
-            $base = Join-Path $drive $parent
-            if (-not (Test-Path $base)) { continue }
-
-            foreach ($sub in Get-ChildItem $base -Directory -ErrorAction SilentlyContinue) {
-                # 名字在黑名单里 → 不是游戏
-                if ($ExcludeStandaloneNames -contains $sub.Name.ToLowerInvariant()) { continue }
-
-                # 判断这个子目录里是否有「看起来像游戏主程序」的 exe
-                $exes = @(Get-ChildItem $sub.FullName -Filter '*.exe' -File -ErrorAction SilentlyContinue |
-                    Where-Object {
-                        $n = $_.Name.ToLowerInvariant()
-                        # 排除安装/卸载/崩溃/辅助类
-                        $n -notmatch '^(setup|install|uninstall|repair|update|crash|bugreport|dxsetup|vcredist)' -and
-                        $n -notmatch '(setup|install|uninstall|repair|updater|crashreport|helper)$'
-                    })
-                if ($exes.Count -gt 0) {
-                    $result += $sub.FullName
-                }
-            }
-        }
-    }
-
-    return $result
-}
+# ---------------------------------------------------------------- 进程匹配
+$ExcludeDirSegments = Get-ExcludedDirSegments
+$ExcludeFilePatterns = Get-ExcludedFilePatterns
 
 function Test-TargetPath {
     param([string]$Path, [string[]]$Roots)
@@ -457,7 +242,7 @@ function Test-TargetPath {
     if (-not $Path) { return $false }
     $lower = $Path.ToLowerInvariant()
 
-    # 1) 必须落在某个游戏根目录下（用反斜杠边界，避免 Foo 匹配到 Foobar）
+    # 1) 必须落在某个游戏根目录下（带反斜杠边界，避免 Foo 匹配到 Foobar）
     $hit = $null
     foreach ($root in $Roots) {
         if ($lower.StartsWith($root + '\')) { $hit = $root; break }
@@ -468,7 +253,7 @@ function Test-TargetPath {
     $relative = $lower.Substring($hit.Length + 1)
     foreach ($seg in ($relative -split '\\')) {
         foreach ($ex in $ExcludeDirSegments) {
-            if ($seg -eq $ex.ToLowerInvariant()) { return $false }
+            if ($seg -eq $ex) { return $false }
         }
     }
 
@@ -484,14 +269,12 @@ function Test-TargetPath {
 function Get-RunningGames {
     <#
         扫描当前进程，返回落在目标目录里的游戏进程。
-
-        读不到 Path 的进程会被跳过并计入 $script:LastScanNoPath：
-        这类进程通常是「以管理员权限运行、而本脚本只有普通权限」的情况，
-        是「明明开着游戏却没反应」的最常见原因，所以要把数量记下来供日志与诊断使用。
+        读不到 Path 的进程（多为以管理员权限运行、而本脚本是普通权限）计入
+        $script:LastScanNoPath —— 这是「开着游戏却没反应」最常见的原因。
     #>
     param([string[]]$Roots)
 
-    $found = @()
+    $found = New-Object 'System.Collections.Generic.List[object]'
     $noPath = 0
 
     foreach ($p in Get-Process) {
@@ -499,30 +282,25 @@ function Get-RunningGames {
         try { $path = $p.Path } catch { $noPath++; continue }
         if (-not $path) { $noPath++; continue }
         if (Test-TargetPath -Path $path -Roots $Roots) {
-            $found += [pscustomobject]@{
-                Name = $p.ProcessName
-                Path = $path
-            }
+            $found.Add([pscustomobject]@{ Name = $p.ProcessName; Path = $path })
         }
     }
 
     $script:LastScanNoPath = $noPath
-    return $found
+    return $found.ToArray()
 }
 
 # ---------------------------------------------------------------- 主循环
-# 注意：用 @() 包裹，否则只有一个游戏目录时 PowerShell 会解包成字符串，
-#       导致 $roots[0] 变成首字母。
-$rootItems = @(Get-TargetRoots)
+# 与清单工具、诊断工具共用 Get-GameRootItems，保证看到的 == 监控的
+$rootItems = @(Get-GameRootItems -Settings $Settings)
 if ($rootItems.Count -eq 0) {
     Write-Log '没有找到任何可监控的游戏目录，退出。' 'ERROR'
+    if ($script:Http) { try { $script:Http.Dispose() } catch { } }
     exit 1
 }
-# 匹配函数只需要路径；另外留一份完整信息用于展示清单
 $roots = @($rootItems | ForEach-Object { $_.Root })
 
 if ($DryRun) {
-    # 自检模式：只打印解析结果，不碰 NVIDIA、不进入循环
     Write-Log ("[DryRun] 已解析 {0} 个游戏目录：" -f $rootItems.Count)
     foreach ($src in @('Steam', 'WeGame', 'Epic', 'Standalone', 'Extra')) {
         $group = @($rootItems | Where-Object { $_.Source -eq $src })
@@ -539,27 +317,30 @@ if ($DryRun) {
     if ($hit.Count -eq 0) {
         Write-Log '    （当前没有游戏在运行）'
     } else {
-        foreach ($h in $hit) { Write-Log ("    ✓ {0}  <-  {1}" -f $h.Name, $h.Path) }
+        foreach ($h in $hit) { Write-Log ("    [命中] {0}  <-  {1}" -f $h.Name, $h.Path) }
     }
 
-    # 权限诊断：读不到路径的进程数很关键
+    # 权限诊断
     $totalProc = @(Get-Process).Count
     Write-Log ("[DryRun] 权限检查：共 {0} 个进程，其中 {1} 个读不到可执行路径" -f $totalProc, $script:LastScanNoPath)
     if ($script:LastScanNoPath -gt ($totalProc * 0.4)) {
-        Write-Log '    读不到路径的比例偏高 —— 若此时确实开着游戏却没识别，就是权限问题。' 'WARN'
-        Write-Log '    解决办法：以管理员身份重新运行（计划任务设为「使用最高权限运行」）。' 'WARN'
+        Write-Log '    读不到路径的比例偏高 —— 若开着游戏却没识别，多半是权限问题。' 'WARN'
+        Write-Log '    解决：右键「点此一键安装.bat」→ 以管理员身份运行。' 'WARN'
     }
 
     Write-Log '[DryRun] 抽查：确认辅助程序会被正确排除'
-    # 基于实际 roots[0] 动态构造用例，这样在真实库和测试库都能验证
+    # 全部用例基于实际 roots[0] 动态构造。
+    # 之前这条 "前缀相同但并非子目录" 是写死的 D:\Steam\...，在 Steam 不在 D 盘的机器上
+    # 会因为「压根不匹配任何 root」而蒙对结果，测不到真正想测的边界。
+    $base = $roots[0]
     $probe = @(
-        @{ P = ($roots[0] + '\FakeGame.exe');                                                  Want = $true  ; D = '根目录下的主程序' }
-        @{ P = ($roots[0] + '\Binaries\AntiCheatExpert\ACE-Service.exe');                      Want = $false ; D = '反作弊目录，应排除' }
-        @{ P = ($roots[0] + '\game\bin\win64\cs2.exe');                                        Want = $true  ; D = '深层主程序' }
-        @{ P = ($roots[0] + '\setup.exe');                                                     Want = $false ; D = '安装程序，应排除' }
-        @{ P = ($roots[0] + '\CrashReportClient.exe');                                         Want = $false ; D = '崩溃上报，应排除' }
-        @{ P = 'D:\Steam\steamapps\commonX\sneaky.exe';                                        Want = $false ; D = '前缀相同但并非其子目录' }
-        @{ P = 'C:\Windows\explorer.exe';                                                      Want = $false ; D = '系统进程' }
+        @{ P = ($base + '\FakeGame.exe');                             Want = $true;  D = '根目录下的主程序' }
+        @{ P = ($base + '\Binaries\AntiCheatExpert\ACE-Service.exe'); Want = $false; D = '反作弊目录，应排除' }
+        @{ P = ($base + '\game\bin\win64\cs2.exe');                   Want = $true;  D = '深层主程序' }
+        @{ P = ($base + '\setup.exe');                                Want = $false; D = '安装程序，应排除' }
+        @{ P = ($base + '\CrashReportClient.exe');                    Want = $false; D = '崩溃上报，应排除' }
+        @{ P = ($base + 'X\sneaky.exe');                              Want = $false; D = '前缀相同但并非其子目录' }
+        @{ P = 'C:\Windows\explorer.exe';                             Want = $false; D = '系统进程' }
     )
     $fail = 0
     foreach ($t in $probe) {
@@ -571,30 +352,32 @@ if ($DryRun) {
     }
 
     Write-Log ("[DryRun] 抽查结果：{0}/{1} 通过" -f ($probe.Count - $fail), $probe.Count)
+    Write-Log "[DryRun] 配置：ScanStandalone=$($Settings['ScanStandalone']) IncludeEpic=$($Settings['IncludeEpic'])"
     Write-Log '[DryRun] 完成，未做任何更改。'
+    if ($script:Http) { try { $script:Http.Dispose() } catch { } }
     if ($mutex) { try { $mutex.ReleaseMutex() } catch { } }
     exit $(if ($fail -eq 0) { 0 } else { 1 })
 }
 
-Write-Log ("准备就绪：{0} 个游戏目录，扫描间隔 {1}s，退出后{2}" -f `
-        $roots.Count, $PollSeconds, $(if ($NoAutoDisable) { '保留回放' } else { '自动关闭' }))
+$poll = [int]$Settings['PollSeconds']
+$autoDisable = [bool]($Settings['AutoDisableOnExit'] -and -not $NoAutoDisable)
 
-$sessionAutoOpened = $false   # 本次游戏会话的回放是否是「本脚本开启的」
-$sessionHandled = $false      # 本次游戏会话是否已做过「启动确认」
-$lastNames = ''               # 用于退出日志
+Write-Log ("准备就绪：{0} 个游戏目录，扫描间隔 {1}s，退出后{2}" -f `
+        $roots.Count, $poll, $(if ($autoDisable) { '自动关闭' } else { '保留回放' }))
+
+$sessionAutoOpened = $false   # 本次会话的回放是否由本脚本「确认开启成功」
+$sessionHandled = $false       # 本次会话是否已做过启动确认
+$lastNames = ''
 
 try {
     while ($true) {
         try {
-            # @() 包裹：只有一个游戏进程时 PowerShell 会解包成单个对象，
-            # 后面用到 .Count / 管道展开会出错。
             $games = @(Get-RunningGames -Roots $roots)
             $nowRunning = $games.Count -gt 0
 
-            # 用「会话是否已处理」而不是「状态是否翻转」来判断，
+            # 用「会话是否已处理」而非「状态是否翻转」判断，
             # 这样脚本后启动、游戏已经在跑时也能正确触发一次。
             if ($nowRunning -and -not $sessionHandled) {
-                # ---------- 进入游戏会话：确认一次回放状态 ----------
                 $names = ($games | Select-Object -ExpandProperty Name -Unique) -join ', '
                 $lastNames = $names
                 Write-Log "检测到游戏运行：$names"
@@ -604,34 +387,42 @@ try {
                     Write-Log '读取回放状态失败（NVIDIA App 可能没在运行或 Overlay 未启用）' 'WARN'
                     $sessionAutoOpened = $false
                 }
-                elseif ($state.ReplayOk) {
+                elseif ($state) {
+                    # 本来就开着（多半是你手动开的）→ 不动，退出时也不关
                     Write-Log '即时回放已开启，保持原状'
                     $sessionAutoOpened = $false
                 }
                 else {
-                    Set-Replay -Enable $true | Out-Null
-                    $sessionAutoOpened = $true
-                    Write-Log '即时回放原本是关闭的 → 已自动开启'
+                    if (Set-Replay -Enable $true) {
+                        $sessionAutoOpened = $true
+                        Write-Log '即时回放原本是关闭的 → 已自动开启（回读确认生效）'
+                    }
+                    else {
+                        # 没成功就绝不能标记为「本脚本开的」，否则退出时会去关
+                        # 一个本不该由我们负责的回放，破坏「手动优先」
+                        $sessionAutoOpened = $false
+                        Write-Log '尝试开启即时回放未成功，本局不再干预' 'WARN'
+                    }
                 }
 
-                # 无论成功与否都标记为已处理：本局不再重复尝试，
-                # 免得反复打 NVIDIA 接口，也免得覆盖你中途的手动操作。
                 $sessionHandled = $true
             }
             elseif (-not $nowRunning -and $sessionHandled) {
-                # ---------- 离开游戏会话：按约定决定是否关闭 ----------
-                if ($NoAutoDisable) {
-                    Write-Log "游戏已退出：$lastNames（-NoAutoDisable，保留回放）"
+                if (-not $autoDisable) {
+                    Write-Log "游戏已退出：$lastNames（配置为保留回放）"
                 }
                 elseif (-not $sessionAutoOpened) {
-                    # 回放是启动前就开着的（你手动开的），不碰它
-                    Write-Log "游戏已退出：$lastNames（回放由你保持开启，不自动关闭）"
+                    Write-Log "游戏已退出：$lastNames（回放非本工具开启，保持不动）"
                 }
                 else {
                     $state = Get-ReplayState
-                    if ($state -and $state.ReplayOk) {
-                        Set-Replay -Enable $false | Out-Null
-                        Write-Log "游戏已退出：$lastNames → 即时回放已关闭"
+                    if ($state) {
+                        if (Set-Replay -Enable $false) {
+                            Write-Log "游戏已退出：$lastNames → 即时回放已关闭（回读确认生效）"
+                        }
+                        else {
+                            Write-Log "游戏已退出：$lastNames → 尝试关闭回放未成功" 'WARN'
+                        }
                     }
                     else {
                         Write-Log "游戏已退出：$lastNames（回放已不在开启状态）"
@@ -642,16 +433,15 @@ try {
                 $sessionAutoOpened = $false
             }
 
-            # 游戏进行中（$sessionHandled 已为 true）：什么都不做，控制权完全留给你
+            # 游戏进行中（$sessionHandled 为 true）：什么都不做，控制权完全留给你
         } catch {
             Write-Log "循环异常：$($_.Exception.Message)" 'ERROR'
         }
 
-        Start-Sleep -Seconds $PollSeconds
+        Start-Sleep -Seconds $poll
     }
 }
 finally {
-    if ($mutex) {
-        try { $mutex.ReleaseMutex() } catch { }
-    }
+    if ($script:Http) { try { $script:Http.Dispose() } catch { } }
+    if ($mutex) { try { $mutex.ReleaseMutex() } catch { } }
 }
